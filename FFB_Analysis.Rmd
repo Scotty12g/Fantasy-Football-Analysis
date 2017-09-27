@@ -1,0 +1,471 @@
+---
+title: "Researching Your Fantasy Football League"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+As with many people across the internet, I play fantasy sports - mostly fantasy football. Friends from college started a league back in the early 2000s. Multiple teams and managers came and went, but in 2010 we started a keeper-league - the Join or Die Fantasy Football League - and solidified a consistent group of 10 managers. The consistency in management and league settings (settings weren't solidified until 2011) presents a great opportunity to look at how individual managers preform against each other over multiple years, and even gather enough data to simulate seasons and compare the results to actual season rankings.
+
+Here, I've coded script that first scrapes data from my fantasy football league, and then analyzes the data in various ways. I look at how trading and player moves affect winning percentage and total points scored in a season, as well as test for differences among managers. Then, I simulate fantasy football seasons based purely on historical performance of the managers (pairwise winning probabilities). I use the league's initial 3 years of data (2011-2013) to simulate 500 full seasons (regular season and playoffs), and then compare the average end-of-season manager rankings to actual average rankings from 2013-2016.
+
+So to begin, I scrape the data using the 'rvest' package. First I need to log into my yahoo fantasy football account and manually find the League IDs that correspond to each year of play - they are a little more difficult to scrape on their own, and make the rest of the process much easier.
+```{r, message=FALSE, warning=FALSE}
+# load the 'rvest' package which helps scrape data from urls
+library(rvest)
+# Log into your yahoo fantasy football page
+# Lookup years and  corrosponding league numbers to make a table
+# from which to lookup the appropriate info to edit urls later
+
+league.lookup<-data.frame(Years=c(2010:2016),LeagueID=c(30634,651422,37137,100418,16517,1333,59799))
+
+# Enter the number of players in the league
+nplayers<-10
+
+# Now enter the base url for archived yahoo fantasy football pages and records, to be used later when building urls to scrape from
+ffbsite.1<-"https://football.fantasysports.yahoo.com/archive/nfl/"
+
+```
+
+
+Now I can scrap the data and put it all in a table. To determine the correct CSS selector for each item I'd like to scrape, I use a handy online tool called "Selector Gadget" (http://selectorgadget.com).
+
+```{r, message=FALSE, warning=FALSE}
+
+# Now to scrape the data from yahoo fantasy sports. We setup two for-loops that iterate over our years and league numbers gathered before, scraping information about how each manager managed their team (i.e., number of trades, and moves), and how they faired against each-other team. Data is stored in dateframes along the way. The selection criteria for each scrape was found using SelectorGadget.
+
+# Start the first for-loop to lookup manager info. We don't use the league's first year - 2010 - because the season format was different than the rest (played with divisions).
+for (i in 2:nrow(league.lookup)){
+
+# Create a url to direct to the correct year and league id using the lookup table from before
+ffbsite.mananger<-read_html(paste0(ffbsite.1,league.lookup[i,1],"/",league.lookup[i,2],"/teams"))
+ffbsite.mananger2<-read_html(paste0(ffbsite.1,league.lookup[i,1],"/",league.lookup[i,2],"?lhst=stand#lhststand"))
+
+# Get the team name
+  team.names<-ffbsite.mananger %>% 
+    html_nodes("#teams .first a") %>%
+    html_text()
+
+# Get team rank, but reorder them based on the team names
+  team.rank<-ffbsite.mananger2 %>% 
+    html_nodes("td.rank") %>%
+    html_text()
+ team.rank.name<-ffbsite.mananger2 %>% 
+    html_nodes("#standingstable a") %>%
+    html_text()
+  team.rank<-team.rank[order(match(team.rank.name,team.names))]
+  
+# Scrape the number of moves a manager makes that season
+  moves<-ffbsite.mananger %>% 
+    html_nodes("td:nth-child(5)") %>%
+    html_text()
+  moves<-moves[which(!is.na(as.numeric(moves)))]
+
+# Scrape the number of trades a manager makes that season
+  trades<-ffbsite.mananger %>% 
+    html_nodes("td.last") %>%
+    html_text()
+  trades<-trades[which(!is.na(as.numeric(trades)))]
+
+# Put all the sata into the data frame
+  manager.table<-data.frame(team.names,team.rank,moves,trades)
+
+# Now begin a loop to scrape info on the scores and outcomes of each game for each manager in the year
+  for (j in 1:nplayers){
+
+# Create a url to direct to the score data for a manager in this league in a specific year
+ffbsite<-read_html(paste0(ffbsite.1,league.lookup[i,1],"/",league.lookup[i,2],"/?lhst=sched&sctype=team&scmid=",j))
+
+# Get the scores of all the manager's games this season - which is a text file you need to separate into two scores (the managers and the opposing teams)
+scores<-ffbsite %>% 
+  html_nodes("#scheduletable .last:nth-child(4) , tr:nth-child(1) td:nth-child(5)") %>%
+  html_text()
+
+scoresMat<-matrix(as.numeric(unlist(strsplit(scores," - "))),ncol=2,byrow=TRUE)
+
+# Get the outcome of the game with respect to the manager
+results<-ffbsite %>% 
+  html_nodes("#scheduletable td.result") %>%
+  html_text()
+
+# Get the name of this manager's team
+team<-ffbsite %>% 
+  html_nodes("#schedsubnav .selected a") %>%
+  html_text()
+
+# Get the names of the teams played
+opponents<-ffbsite %>% 
+  html_nodes("#scheduletable td.team") %>%
+  html_text()
+
+# Put all the info in a data frame
+ffb.dat<-data.frame(Year=league.lookup[i,1],PlayerRank=manager.table[which(manager.table$team.names==team),2],Moves=manager.table[which(manager.table$team.names==team),3],Trades=manager.table[which(manager.table$team.names==team),4],TeamName=team,Opponent=opponents,Result=results,Scored=NA,Against=NA)
+ffb.dat[,c("Scored","Against")]<-scoresMat
+
+# So that the for-loop keeps extending the data frame, we use an if else argument which creartes a new data frame on the first pass, but adds on to the dataframe on each pass after that
+if(i<=2&j==1){ffb.dat.1<-ffb.dat}else{ffb.dat.1<-rbind(ffb.dat.1,ffb.dat)}
+  }}
+```
+
+
+Next, I need to clean the data up a bit, inserting actual manager names (since team names change over the years), and converting ranking data from characters to numbers.
+
+```{r, message=FALSE, warning=FALSE}
+# Now we can fill in the manager names by taking the unique list of team names (since some team names change over the years) and pair it with a manager name in a lookup table
+manager.correction<-data.frame(TeamName=unique(ffb.dat.1$TeamName),Manager=c("Owen","Henry","Paul","Jared B","Jared S","Andrew","Scott","Spears","Lisa and PC","Rick","Paul","Jared S","Jared S","Scott","Henry"))
+
+# We use the match function to lookup the correct manager name for each team name
+ffb.dat.1$Manager<-manager.correction$Manager[match(ffb.dat.1$TeamName,manager.correction$TeamName)]
+ffb.dat.1$OpposingManager<-manager.correction$Manager[match(ffb.dat.1$Opponent,manager.correction$TeamName)]
+
+#Now fix player rank by removing the '.' and the '*'
+levels(ffb.dat.1$PlayerRank)<-c(1,2,3,4,10,5,6,7,8,9)
+ffb.dat.1$PlayerRank<-as.numeric(paste(ffb.dat.1$PlayerRank))
+
+```
+
+
+Now we're set to glace at the first few lines of data we've gathered.
+```{r, message=FALSE, warning=FALSE}
+# We can get a quick look at the data we just gatehred
+head(ffb.dat.1)
+```
+
+
+We can also summarize the data by manager.
+```{r, message=FALSE, warning=FALSE}
+# Now lets summarize the winning percentage and total points scored for each team in each year
+require(plyr)
+# We need a function to calculate the win percentage for the season
+winperc.func<-function(x){length(which(x=="Win"))/length(x)}
+win.func<-function(x){length(which(x=="Win"))}
+loss.func<-function(x){length(which(x=="Loss"))}
+
+ffb.dat.sum<-ddply(ffb.dat.1,c("Year","Manager"),summarise,Moves=mean(as.numeric(Moves)),Trades=mean(as.numeric(Trades)),Wins=win.func(Result),Loss=loss.func(Result),WinPercent=winperc.func(Result),Total=sum(Scored),PlayerRank=mean(PlayerRank))
+
+# Check to see if any columns have NA values
+apply(ffb.dat.sum,2,anyNA)
+
+# Ands lets look at average stats for each manager
+ddply(ffb.dat.sum,c("Manager"),colwise(mean))[,-2]
+
+```
+
+
+Let's start to look at how the continuous variables relate to each other - especially how potential explanitory variables (Moves, Trades) relate to response variables (Winning Percentage, Total Points). It seems as if Trades and Moves are slightly correlated, and Winning Percentage is unsurprisingly correlated with Total Points Scored and a Player's end of year Rank. It also looks like number of Trades is possibly negatively related to the Winning Percentage and Rank... hold on to that one for later.
+```{r, message=FALSE, warning=FALSE}
+# And we can start to ask how some actions taken by the managers, Moves and Trades, relate to potential successes, Wins and Total points. We use the 'cor' function for this.
+
+cor(ffb.dat.sum[,-c(1:2)])
+```
+
+There is a moderate amount of variation in Winning Percentage and Total Points scored among managers, which we can visualise in box plots. We can see that Lisa and PC have suprisingly little variaiton i their total points scored from year to year, while Rick has a lot of variaiton in his winning percentage. Although Winning Percentage and Total Points vary among managers, we'd like to know if differences are significant - especially before we start to run simulaitons.
+```{r, message=FALSE, warning=FALSE}
+# We can also quickly look at how Wins and Total points varied among manager with box plots
+require(ggplot2)
+ggplot(ffb.dat.sum,aes(x=Manager,y=WinPercent))+
+  scale_y_continuous(name="Winning Percentage")+
+  geom_boxplot()+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(ffb.dat.sum,aes(x=Manager,y=Total))+
+  scale_y_continuous(name="Total Points Scored in a Season")+
+  geom_boxplot()+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+
+For a more in-depth analysis, we use a linear model to test how Manager, Moves, and Trades affect Total points scored. First we center and scale the Moves and Trades data, since there was some correlation between them and we want to avoid multicolinearity. After creating the model, we check some diagnostic plots to ensure the model is fitting correctly and that the residuals are well distributed and not biased.
+```{r, message=FALSE, warning=FALSE}
+# Lets center and scale the data to minimize the multicolinearity among explanatory variables
+ffb.dat.sum.scale<-ffb.dat.sum
+ffb.dat.sum.scale[,c(3:4)]<-apply(ffb.dat.sum.scale[,c(3:4)],2,scale)
+ffb.dat.total.lm<-lm(Total~Manager+Moves+Trades,ffb.dat.sum.scale)
+
+# Plot the diagnostics, whcih seem fine and the data seem to fit assumtions of normality pretty well
+plot(ffb.dat.total.lm,which=c(1:2))
+
+```
+
+We can now view a summary of the model, which accounts for ~30% of the variation in Total Points scored after accounting for the number of parameters we use (Adjusted R-Squared). We can also see that the model residuals look relatively normal (mostly evenly distributed around the median).
+```{r}
+#show the results
+summary(ffb.dat.total.lm)
+```
+
+A look at the individual effects indicates that Manager accounts for a significant amount of the variation in Total Points scores, but Moves and Trades do not help us explain points scored in a season.
+```{r, message=FALSE, warning=FALSE}
+# And test the effects
+anova(ffb.dat.total.lm)
+```
+
+
+Next we look at how the actual winning percentage relates to Manager, Moves and Trades using logistic regression. Again, we assess some diagnostic plots and the model seems to fit OK (a little funky at the bottom of the Q-Q plot).
+```{r, message=FALSE, warning=FALSE}
+# Now look at the effects on winning
+ffb.dat.win.lm<-glm(cbind(Wins,Loss) ~ Manager+Moves+Trades,family=binomial(link='logit'),data=ffb.dat.sum.scale)
+
+# Again, the model seems as though it its well
+plot(ffb.dat.win.lm,which=c(1:2))
+
+```
+
+
+We take a closer look at the model, and we can see that both Manger and Trades seem to be important to explaining Winning Percentage.
+```{r, message=FALSE, warning=FALSE}
+# Now lets look at the model and the effects
+summary(ffb.dat.win.lm)
+anova(ffb.dat.win.lm,test="Chisq")
+
+```
+
+
+We know from the box plots before that winning percentage is relatively variable among managers, so let's take a closer look at how trades affect winning percentage. First we look at the model coefficient, which seems to indicate that Trading players has a NEGATVIE effect on winning percentage?
+```{r}
+# Now we can look at the effect Trades has on winning, which seems to be negative
+ffb.dat.win.lm$coefficients["Trades"]
+```
+
+This seems odd... or at the very least, I'd like to be certain of the result before rejecting every trade my friends offer me. By plotting winning percentage as a function of number of trades, we can see an outlier with a high number of trades and a low winning percentage that could be driving our pattern.
+```{r}
+# Let's plot winning percentage as a function of trades to see whats gooing on.
+# It seems like more of a sample size and variance issue than an actual trade effect.
+with(ffb.dat.sum,plot(WinPercent~Trades))
+```
+
+We remove this outlier and re-run the model to see if the point was driving most of our results for Trades. It seems to have been, since the Trades effect disappears... good to know for next season.
+```{r}
+# If we remove that pone outlier, the effect dissapears
+ffb.dat.sum.fix<-ffb.dat.sum[-which(ffb.dat.sum$Trades==4),]
+ffb.dat.sum.fix.scale<-ffb.dat.sum.fix
+ffb.dat.sum.fix.scale[,c(3,4)]<-apply(ffb.dat.sum.fix[,c(3,4)],2,scale)
+ffb.dat.win.lm<-glm(cbind(Wins,Loss) ~ Manager+Moves+Trades,family=binomial(link='logit'),data=ffb.dat.sum.fix.scale)
+anova(ffb.dat.win.lm,test="Chisq")
+```
+
+
+We can also look at the pairwise probability that each manager will beat another manager in a match up. We do so in a table (displayed below as a heat map) where columns are the manager of interest, and the rows are their potential opponents. Each value reflects the probability that the manger will beat each individual opponent (total wins/games played), and each column sums to 1 (i.e., 100%). We can already see that Spears and Andrew have relatively low probabilities of beating any other manager, although Andrew often beats Spears. We also see that while Spears may lose a lot, he beats me (Scott) more often than not... such is life.
+```{r, message=FALSE, warning=FALSE}
+
+# Now we create a lookup table for the number of wins and losses for each matchup
+# In this case, rows represent the manager to lookup, and the columns represent the number of wins (win.table) or losses (lose.table) against each other team (columns).
+win.table<-ffb.dat.1[which(ffb.dat.1$Result=="Win"),c("Manager","OpposingManager")]
+win.table<-table(win.table)
+lose.table<-ffb.dat.1[which(ffb.dat.1$Result=="Loss"),c("Manager","OpposingManager")]
+lose.table<-table(lose.table)
+
+# We now calculate the probability of a victory for each matchup
+JOD.MCM.full<-win.table/(win.table+lose.table)
+
+# We can use the 'reshape' package to melt down the probability table so we can plot it as a heatmap
+require(reshape)
+JOD.MCM.table<-melt(JOD.MCM.full)
+
+# The heatmap can show the probabilty of a manager (columns) beating another team (rows), with higher probabilites reflected in deeper reds. I've also included the actual probability in each cell of the heatmap for easy reference
+ggplot(JOD.MCM.table, aes(x = Manager, y = OpposingManager)) +
+  geom_tile(aes(fill = value)) +
+  scale_y_discrete(name="Opposing Manager")+
+  geom_text(aes(label=round(value,2)))+
+  scale_fill_gradient(na.value = 'black',name="Probability\nof Winning",low="white",high="dark red")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+
+Now it's time for a simulation! We first create another probability table as above, except only with data from 2011-2013. We save the remaining data to check the simulation results against.
+
+Then, we create a template for a Fantasy Football regular season schedule (14 games). The easiest way to do this is to take a schedule that already exists, like that from our 2014 Yahoo season, and use it as a template where each team is a number. We can then randomize which team corresponds to each number for a new season's schedule.
+
+Lastly, we create a string of for-loops that randomly generates a fantasy football schedule, iterativly go through the schedule, and for each match-up/game in the list, look up the probability that either manager beats the opposing one. Then, we choose between the opposing managers, weighting our choice by their respective probabilities of winning the match up. The choice is the winner of the match!
+
+This happens over and over and over... again until the regular season is over. Then, the regular season ranks are calculated, and managers are placed into a playoff bracket with Ranks 1 vs 4, 2 vs 3, 5 vs 8, and 6 vs 7. Teams ranked 9 and 10 stay at those ranks to think about how awful they are and plan for next year. This format is how our league actually operates on Yahoo.
+
+The results from the finals are placed into a data-table, yielding a rank for each manager (columns) for the season (row). The entire loop starts over again for a new season, and repeats until we're simulated 500 seasons.
+
+```{r, message=FALSE, warning=FALSE}
+# Now we create another probability table just as beofore, but only using the first 3 years of data
+win.table.sub<-ffb.dat.1[which(ffb.dat.1$Result=="Win" & ffb.dat.1$Year<=2013),c("Manager","OpposingManager")]
+win.table.sub<-table(win.table.sub)
+lose.table.sub<-ffb.dat.1[which(ffb.dat.1$Result=="Loss"& ffb.dat.1$Year<=2013),c("Manager","OpposingManager")]
+lose.table.sub<-table(lose.table.sub)
+
+JOD.MCM<-win.table.sub/(win.table.sub+lose.table.sub)
+
+# Before we simulate seasons of fantasy football, we need to generate schedules. The easiest way to do this is to take a schedule that already exists, like that from 2014, and use it as a template where we can randomize which team corrosponds to each number for new season schedules
+
+matchup.table.raw<-matrix(match(as.vector(subset(ffb.dat.1,Year==2014)[,c(6)]),as.vector(unique(subset(ffb.dat.1,Year==2014)[,c(5)]))),ncol=14,byrow=TRUE)
+
+# We now setup an array to hold all of the simulation data (end of season team rankings)
+# I've chosen to simulate 500 seasons
+sim.seasons<-array(NA,c(500,10))
+colnames(sim.seasons)<-as.vector(rownames(JOD.MCM))
+
+# Now for 500 simulated seasons using for-loops
+for (s in 1:500){
+#First, create a seasons schedule by randomly assigning teams/managers to a number, and placeing them into the schedule template for the 14 regular season games
+matchup.names<-sample(as.vector(rownames(JOD.MCM)),10)
+matchup.table<-matrix(matchup.names[matchup.table.raw],ncol=14)
+rownames(matchup.table)<-matchup.names
+colnames(matchup.table)<-c(1:14)
+
+#Then, create a data frame to hold the scheduled matchup, and eventually the results of the matchup
+matchup.sim<-data.frame(Week=NA,Manager=NA,Opponent=NA,Winner=NA)
+
+# Loop over the matchups in the schedule and only insert unique matchups for the season (since the schedule template gives matchup 'A vs B' as well as 'B vs A')
+for (i in 1:ncol(matchup.table)){
+for(j in 1:nrow(matchup.table)){
+  if(j==1&i==1){matchup.sim[1,]<-c(i,rownames(matchup.table)[j],matchup.table[j,i],NA)}else{
+  if(any(rownames(matchup.table)[j]==subset(matchup.sim,Week==i)[,3])==FALSE){
+    matchup.sim<-rbind(matchup.sim,data.frame(Week=i,Manager=rownames(matchup.table)[j],Opponent=matchup.table[j,i],Winner=NA))
+  }}
+}}
+
+# Now to find out the winners of the matchups
+for(i in 1:nrow(matchup.sim)){
+# For each matchup in the list, lookup the probabability that the manager (home team) beats the opposing manager, and the probability the oposing manager wins (just 1-P, but we look it up anyway)
+  mananger.prob<-JOD.MCM[matchup.sim$Manager[i],matchup.sim$Opponent[i]]
+  opponent.prob<-JOD.MCM[matchup.sim$Opponent[i],matchup.sim$Manager[i]]
+
+  # Choose between the manager and the opposing manager with probability manager.prob and opponent.prob respectively. The choice in the winner of the match!
+  matchup.sim$Winner[i]<-sample(c(matchup.sim$Manager[i],matchup.sim$Opponent[i]),1,prob=c(mananger.prob,opponent.prob))
+}
+
+# Summarize the results of the regular season matchups by using the frequency of the managers name in the winner column, then rank the managers by the number of wins for the end of regular season rankings
+reg.results<-table(matchup.sim$Winner)
+reg.rank<-names(reg.results)[order(reg.results,decreasing = TRUE)]
+
+# Now use the regular season rankings to setup the mathups in the semifinal round
+# Creatre a matrix by rank, but switch the 2nd and 4th ranked, and 6th and 8th ranked players to create the appropriate matchups
+semifinal<-matrix(reg.rank,ncol=2,byrow=TRUE)
+new.match<-c(semifinal[2,2],semifinal[1,2],semifinal[4,2],semifinal[3,2],semifinal[5,2])
+semifinal[,2]<-new.match
+
+# Add a column for the winners to be recorded in
+semifinal<-cbind(semifinal,rep(NA,5))
+
+# Now simulate the semifinal in the same way as the regular season
+for(i in 1:nrow(semifinal)){
+  mananger.prob<-JOD.MCM[semifinal[i,1],semifinal[i,2]]
+  opponent.prob<-JOD.MCM[semifinal[i,2],semifinal[i,1]]
+  semifinal[i,3]<-sample(c(semifinal[i,1],semifinal[i,2]),1,prob=c(mananger.prob,opponent.prob))
+}
+# The final two spots do not compete in our semifinals or finals, so we automatically place the better ranked individual into the winners spot
+semifinal[5,3]<-semifinal[5,1]
+
+# Use the frequency of names to determine which teams/managers move up a spot (winners with more instances of their name) and which move down a spot (losers with fewer instances of their name).
+semifinal.results.1<-table(semifinal[c(1:2),])
+semifinal.results.2<-table(semifinal[c(3:4),])
+semifinal.results.3<-table(semifinal[5,])
+semi.rank<-c(names(semifinal.results.1)[order(semifinal.results.1,decreasing = TRUE)],names(semifinal.results.2)[order(semifinal.results.2,decreasing = TRUE)],names(semifinal.results.3)[order(semifinal.results.3,decreasing = TRUE)])
+
+# create the matchups for the final round with a place holder for the winner
+final<-matrix(semi.rank,ncol=2,byrow=TRUE)
+final<-cbind(final,rep(NA,5))
+
+# Simulate the finals the same way we did the regualr season and semifinals
+for(i in 1:nrow(final)){
+  mananger.prob<-JOD.MCM[final[i,1],final[i,2]]
+  opponent.prob<-JOD.MCM[final[i,2],final[i,1]]
+  final[i,3]<-sample(c(final[i,1],final[i,2]),1,prob=c(mananger.prob,opponent.prob))
+}
+# Again, the last palced teams keep their ranks and do not compete
+final[5,3]<-final[5,1]
+
+# Use the frequency of names to determine which teams/managers move up a spot (winners with more instances of their name) and which move down a spot (losers with fewer instances of their name).
+final.results.1<-table(final[1,])
+final.results.2<-table(final[2,])
+final.results.3<-table(final[3,])
+final.results.4<-table(final[4,])
+final.results.5<-table(final[5,])
+final.rank<-c(names(final.results.1)[order(final.results.1,decreasing = TRUE)],names(final.results.2)[order(final.results.2,decreasing = TRUE)],names(final.results.3)[order(final.results.3,decreasing = TRUE)],names(final.results.4)[order(final.results.4,decreasing = TRUE)],names(final.results.5)[order(final.results.5,decreasing = TRUE)])
+
+# Input the final rnakings into the array for season simulation results, and go back to the beginning of the loop for a new season simulation
+sim.seasons[s,]<-order(final.rank)
+}
+
+```
+
+Here is a look at the first few lines of data we get.
+```{r, message=FALSE, warning=FALSE}
+# Get a quick look at the data we just gatehred
+head(sim.seasons)
+
+```
+
+We can view the rankings for each manager using a box plot.... poor Spears, but it looks like Rick did pretty well in most simulations.
+```{r}
+# And even plot all the data in a box plot
+sim.seasons.melt<-melt(sim.seasons)
+colnames(sim.seasons.melt)<-c("Simulation","Manager","Rank")
+
+ggplot(sim.seasons.melt,aes(x=Manager,y=Rank))+
+  scale_y_reverse( lim=c(10,1),name="Simulated Ranks")+
+  geom_boxplot()+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+For a cleaner look, we calculate the mean rank with 95% confidence intervals for each manager across all 500 simulations, and place a dotted line at rank 5 (middle of the road in our 10 team league). One  thing to note is how constrained the 95% confidence intervals are. This is likely because we ran 500 simulations, which is sort of excessive, and large sample sizes will naturally decrease any measure of variance in sample mean (like standard error and 95% confidence intervals) - increasing precision. As in the box plot, we can still see how poorly and well Spears and Rick did respectively, but the relative performance of other managers is more clear now. Also, we indicate each managers actual 2011-2013 mean ranking in the figure with color, and see that, for the most part, managers that rank high in the simulation, actually ranked high bertween 2011 and 2013.
+```{r, message=FALSE, warning=FALSE}
+# We can use the 'plyr' library to summarize the mean rank, and the standard deviation in rank for each manager over all 500 simulations
+require(plyr)
+
+sim.seasons.results<-data.frame(Name=as.vector(rownames(JOD.MCM)),Mean=apply(sim.seasons,2,mean),Stdev=apply(sim.seasons,2,sd))
+
+# Also, we calcualte the standard error, and 95% confidence intervals in rank
+sim.seasons.results$StdErr<-sim.seasons.results$Stdev/sqrt(500)
+sim.seasons.results$Conf95<-sim.seasons.results$StdErr*1.96
+
+# Add in the mean rank from the actual data from years we didn't use in the simulation, to see how the simulation does, and who hasn't won, even though the beat other managers frequently
+ffb.dat.sum.2011.2013<-subset(ffb.dat.sum,Year<=2013)
+ffb.dat.sum.2014.2016<-subset(ffb.dat.sum,Year>2013)
+PlayerRank.sum1<-ddply(ffb.dat.sum.2011.2013,c("Manager"),summarise,PlayerRank=mean(PlayerRank))
+PlayerRank.sum2<-ddply(ffb.dat.sum.2014.2016,c("Manager"),summarise,PlayerRank=mean(PlayerRank))
+sim.seasons.results$PlayerRank.2011.2013<-PlayerRank.sum1$PlayerRank
+sim.seasons.results$PlayerRank.2014.2016<-PlayerRank.sum2$PlayerRank
+
+
+# Then we plot the results, along with a red dotted line at a mean ranking of 5, indicating the midpoint in our 10 team league so we can see who falls above and below it
+ggplot(sim.seasons.results,aes(x=factor(Name),y=Mean,ymax=Mean+Conf95,ymin=Mean-Conf95,colour=PlayerRank.2011.2013))+
+  geom_pointrange()+
+  scale_y_reverse( lim=c(10,1),name="Average Rank (+/- 95% Confidence Interval)")+
+  scale_x_discrete(name="Manager")+
+  scale_color_gradient(name="Actual\n2011-2013\nMean Rank",low="red",high="black",guide=guide_colourbar(reverse=TRUE))+
+  ggtitle("  Average Fantasy Rank (500 Simulations)")+
+  geom_hline(yintercept=5,colour="red",linetype = "dashed")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+```
+
+We can also look at the correlation between sumulated and actual rankings between 2011 and 2013 and find that the simulaion did a pretty good job.
+```{r, message=FALSE, warning=FALSE}
+with(sim.seasons.results,cor(Mean,PlayerRank.2011.2013))
+```
+
+
+Since these simulated results came from 2011-2013 fantasy data, we can compare it to actual fantasy data from 2014-2016. We do so by plotting average manager rank from the simulation against average actual rank from the newer (2014-2016) data. We can see that most managers fall along or near the 1:1 line (dotted black), indicating that the simulation from 2011-2013 data captured the ranks in 2014-2016 data well. But, Spears and Rick fall pretty far from the 1:1 line - Rick performing much better during simulation than expected based on his actual rank, and Spears performing worse than expected. This pattern could mean two things: 1) The simulation did not capture Spears and Rick's performance well because there is a fundamental problem/inaccuracy in how we simulate Spears and Rick (they can definitely be wild-cards in the group). Since the simulation results were well correlated with 2011-2013 data though, it's more likely that Spears and Rick have actually improved and worsened their 2014-2016 fantasy play respectively, compared to their 2011-2013 play.
+
+```{r, message=FALSE, warning=FALSE}
+# And now lets look at the relation between predicted rank and the actual rank in a plot
+# You can see that, based on simulated predictions from the first three years of data, Rick has underpreformed in the follwing three years, while Spears has exceeded expectations
+ggplot(sim.seasons.results,aes(x=PlayerRank.2014.2016,y=Mean,shape=Name))+
+  geom_point()+
+  xlim(10,1)+ylim(10,1)+
+  labs(x="Average Actual Rank (2014-2016 data)",y="Average Simulated Rank (2011-2013 data)")+
+  geom_abline(slope=1,intercept=0,linetype = "dashed")+
+  scale_shape_manual(values=1:nlevels(sim.seasons.results$Name),name="Manager") +
+  theme_bw()
+```
+
+Overall, we can conclude that the majority of the variation in winning the Join or Die Fantasy Football League is not captured by what variation we see in Trades and Moves. There are probably other variables inherient in the variation among managers (e.g., draft performance, interest in fantasy games, proclivity to procrastinate at work and research sports stats), that determine the winning percentage, and eventual ranking, of teams. We can, however, say that Spears and his "Chilean Spear Fishers"" are on the up-and-up, while Rick and his "Alexandria Emperors"" have lost some of that pizzazz that made them a powerhouse from 2011-2013.
+
+That's it!
+
+
+
