@@ -4,4 +4,4 @@ Scraped 6 years of fantasy football data, and used logistic regression and stoch
 
 To view the HTML rendering of this code, please visit:
 
-http://htmlpreview.github.io/?https://github.com/Scotty12g/Fantasy-Football-Analysis/blob/master/FFB_Analysis.html
+https://rpubs.com/Scotty12g/JOD_FFB_Scrape
